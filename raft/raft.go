@@ -713,3 +713,18 @@ func (r *Raft) maybeCommit() bool {
 func (r *Raft) quorum() int {
 	return len(r.Prs)/2 + 1
 }
+
+func (r *Raft) softState() *SoftState {
+	return &SoftState{
+		Lead:      r.Lead,
+		RaftState: r.State,
+	}
+}
+
+func (r *Raft) hardState() *pb.HardState {
+	hardState, _, err := r.RaftLog.storage.InitialState()
+	if err != nil {
+		log.Panicf("#%v, fails to get hard state, [error:%v]", r.id, err)
+	}
+	return &hardState
+}

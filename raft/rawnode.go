@@ -70,12 +70,20 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	preSoftState SoftState
+
+	preHardState pb.HardState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	node := &RawNode{
+		Raft: newRaft(config),
+	}
+	node.preSoftState = *node.Raft.softState()
+	node.preHardState = *node.Raft.hardState()
+	return node, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -143,19 +151,68 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	rn.Raft.lock()
+	defer rn.Raft.unLock()
+	msgs := rn.Raft.msgs
+	hard := rn.Raft.hardState()
+	soft := rn.Raft.softState()
+	ready := Ready{
+		Entries:          rn.Raft.RaftLog.unstableEntries(),
+		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
+		Messages:         msgs,
+	}
+	if !isHardStateEqual(*hard, rn.preHardState) {
+		ready.HardState = *hard
+	}
+	if !isSoftStateEqual(*soft, rn.preSoftState) {
+		ready.SoftState = soft
+	}
+	return ready
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	return false
+	ready := rn.Ready()
+
+	isPending := func() bool {
+		if ready.SoftState != nil {
+			return false
+		}
+		if !IsEmptyHardState(ready.HardState) {
+			return false
+		}
+		if !IsEmptySnap(&ready.Snapshot) {
+			return false
+		}
+		if len(ready.CommittedEntries) != 0 || len(ready.Entries) != 0 ||
+			len(ready.Messages) != 0 {
+			return false
+		}
+		return true
+	}
+	return !isPending()
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	if rd.SoftState != nil {
+		rn.preSoftState = *rd.SoftState
+	}
+	if !IsEmptyHardState(rd.HardState) {
+		rn.preHardState = rd.HardState
+	}
+	rn.Raft.msgs = make([]pb.Message, 0)
+	le := len(rd.Entries)
+	if le != 0 {
+		rn.Raft.RaftLog.stabled = rd.Entries[le-1].Index
+	}
+	le = len(rd.CommittedEntries)
+	if le != 0 {
+		rn.Raft.RaftLog.applied = rd.CommittedEntries[le-1].Index
+	}
 }
 
 // GetProgress return the Progress of this node and its peers, if this
