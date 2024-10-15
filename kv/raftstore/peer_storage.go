@@ -19,6 +19,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
 	"github.com/pingcap-incubator/tinykv/raft"
 )
@@ -309,6 +310,49 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	if len(entries) == 0 {
+		return nil
+	}
+	log.Infof("%v appending len:%v,[0]:index:%v,term:%v", ps.Tag, len(entries), entries[0].Index, entries[0].Term)
+	firstIndex, _ := ps.FirstIndex()
+	last := entries[0].Index + uint64(len(entries)) - 1
+
+	// shortcut if there is no new entry.
+	if last < firstIndex {
+		return nil
+	}
+	first := entries[0].Index
+	// truncate compacted entries
+	if firstIndex > first {
+		log.Infof("%v append and truncate input entries from raft ready", ps.Tag)
+		entries = entries[firstIndex-entries[0].Index:]
+	}
+
+	lastIndex, _ := ps.LastIndex()
+	switch {
+	case lastIndex >= first:
+		for i := first; i <= lastIndex; i++ {
+			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, i))
+		}
+	case lastIndex+1 == first:
+	default:
+		// test maybe fails
+		log.Panicf("missing log entry [last: %d, append at: %d]",
+			lastIndex, entries[0].Index)
+	}
+	lIndex := last
+	lTerm := entries[len(entries)-1].Term
+	ps.raftState.LastIndex = lIndex
+	ps.raftState.LastTerm = lTerm
+	for _, ent := range entries {
+		key := meta.RaftLogKey(ps.region.Id, ent.Index)
+		if err := raftWB.SetMeta(key, &ent); err != nil {
+			return err
+		}
+	}
+	if err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -332,6 +376,44 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
+	deepCopyRaftState := func() *rspb.RaftLocalState {
+		return &rspb.RaftLocalState{
+			HardState: &eraftpb.HardState{
+				Term:   ps.raftState.HardState.Term,
+				Commit: ps.raftState.HardState.Commit,
+				Vote:   ps.raftState.HardState.Vote,
+			},
+			LastIndex: ps.raftState.LastIndex,
+			LastTerm:  ps.raftState.LastTerm,
+		}
+	}
+
+	if ready == nil {
+		log.Debugf("%v ready is nil", ps.Tag)
+		return nil, nil
+	}
+
+	raftWB := new(engine_util.WriteBatch)
+	raftState := deepCopyRaftState()
+	// persist raft hard state
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+		raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+	}
+	// persist log entries
+	if len(ready.Entries) > 0 {
+		if err := ps.Append(ready.Entries, raftWB); err != nil {
+			return nil, err
+		}
+	}
+	if raftWB.Len() > 0 {
+		if err := ps.Engines.WriteRaft(raftWB); err != nil {
+			// discard ps.raftState
+			ps.raftState = raftState
+			return nil, err
+		}
+	}
+
 	return nil, nil
 }
 
@@ -345,4 +427,57 @@ func (ps *PeerStorage) clearRange(regionID uint64, start, end []byte) {
 		StartKey: start,
 		EndKey:   end,
 	}
+}
+
+func (ps *PeerStorage) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraftpb.Entry, error) {
+	log.Debugf("#%v begin to apply committed entries", ps.Tag)
+	le := len(entries)
+	// if le <= 0 {
+	// 	log.Debugf("%v committed entries is empty", ps.Tag)
+	// 	return nil, nil
+	// }
+	log.Infof("%v committing entries len:%v,[0]:index:%v,term:%v", ps.Tag, le, entries[0].Index, entries[0].Term)
+	applyState := *ps.applyState
+	batch := new(engine_util.WriteBatch)
+	cur := 0
+	for _, entry := range entries {
+		if entry.Index != ps.AppliedIndex()+1 {
+			log.Infof("%v try to apply entries wrong", ps.Tag)
+			cur++
+			continue
+		}
+		break
+	}
+	if cur < le {
+		entries = entries[cur:]
+	} else {
+		entries = make([]eraftpb.Entry, 0)
+	}
+	for _, entry := range entries {
+		if entry.Index != ps.AppliedIndex()+1 {
+			log.Panicf("%v try to apply entries wrong", ps.Tag)
+		}
+		if entry.EntryType == eraftpb.EntryType_EntryNormal && entry.Data != nil {
+			var re raft_cmdpb.RaftCmdRequest
+			if err := proto.Unmarshal(entry.Data, &re); err != nil {
+				return nil, err
+			}
+			for _, request := range re.Requests {
+				switch request.CmdType {
+				case raft_cmdpb.CmdType_Put:
+					batch.SetCF(request.Put.Cf, request.Put.Key, request.Put.Value)
+				case raft_cmdpb.CmdType_Delete:
+					batch.DeleteCF(request.Delete.Cf, request.Delete.Key)
+				}
+			}
+		}
+		ps.applyState.AppliedIndex = entry.Index
+	}
+	if ps.AppliedIndex() > applyState.AppliedIndex {
+		batch.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState)
+		if err := ps.Engines.WriteKV(batch); err != nil {
+			return nil, err
+		}
+	}
+	return entries, nil
 }

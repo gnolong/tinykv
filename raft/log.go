@@ -76,13 +76,30 @@ func newLog(storage Storage) *RaftLog {
 		}
 		l.entries = append(l.entries, entries...)
 	}
+	if firstIndex != 1 {
+		l.entries[0].Index = firstIndex - 1
+		term, err := l.storage.Term(firstIndex - 1)
+		if err != nil {
+			log.Fatalf("fails to get the truncated entry term, [error:%v]", err)
+		}
+		l.entries[0].Term = term
+	}
 	snap, err := storage.Snapshot()
-	if err != nil {
+	if err != nil && err != ErrSnapshotTemporarilyUnavailable {
 		log.Fatalf("fails to new raft log, [error:%v]", err)
 	}
 	if snap.Metadata != nil {
 		l.entries[0].Term = snap.Metadata.Term
 		l.entries[0].Index = snap.Metadata.Index
+		l.entries = l.entries[:1]
+		index := l.entries[0].Index + 1
+		if lastIndex >= index {
+			entries, err := storage.Entries(index, lastIndex+1)
+			if err != nil {
+				log.Fatalf("fails to new raft log, [error:%v]", err)
+			}
+			l.entries = append(l.entries, entries...)
+		}
 	}
 	return l
 }

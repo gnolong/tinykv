@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"log"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -82,7 +83,11 @@ func NewRawNode(config *Config) (*RawNode, error) {
 		Raft: newRaft(config),
 	}
 	node.preSoftState = *node.Raft.softState()
-	node.preHardState = *node.Raft.hardState()
+	hardState, _, err := node.Raft.RaftLog.storage.InitialState()
+	if err != nil {
+		log.Panicf("#%v, fails to get hard state, [error:%v]", node.Raft.id, err)
+	}
+	node.preHardState = hardState
 	return node, nil
 }
 
@@ -154,7 +159,7 @@ func (rn *RawNode) Ready() Ready {
 	rn.Raft.lock()
 	defer rn.Raft.unLock()
 	msgs := rn.Raft.msgs
-	hard := rn.Raft.hardState()
+	hard := rn.Raft.newHardState()
 	soft := rn.Raft.softState()
 	ready := Ready{
 		Entries:          rn.Raft.RaftLog.unstableEntries(),

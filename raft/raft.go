@@ -417,7 +417,7 @@ func (r *Raft) Step(m pb.Message) error {
 			r.bcastHeartbeat()
 		}
 	case pb.MessageType_MsgPropose:
-		if r.State == StateLeader {
+		if r.State != StateCandidate {
 			r.handlePropose(m)
 		}
 	case pb.MessageType_MsgAppend:
@@ -465,10 +465,18 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	} else if r.State == StateFollower {
 		r.Lead = m.From
 	}
+	// reset election elapsed time
+	r.electionElapsed = 0
+
 	// append entries
 	lastTerm, lastIndex := r.getLastTermAndIndex()
 	if lastIndex < m.Index {
 		appendResponse(true, lastTerm, lastIndex)
+		return
+	}
+	lastIncludedIndex, _ := r.RaftLog.GetLastIncludedIndexAndTerm()
+	if m.Index < lastIncludedIndex {
+		appendResponse(false, 0, r.RaftLog.committed)
 		return
 	}
 	term := r.RaftLog.MustTerm(m.Index)
@@ -501,6 +509,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None)
+		return
+	}
+	if r.State != StateLeader {
 		return
 	}
 	p := r.Prs[m.From]
@@ -551,6 +562,8 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	} else if r.State == StateFollower {
 		r.Lead = m.From
 	}
+	// reset election elapsed time
+	r.electionElapsed = 0
 	appendResponse(false)
 }
 
@@ -611,7 +624,13 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 }
 
 func (r *Raft) handlePropose(m pb.Message) {
-	r.validateStateLeader()
+	if r.State == StateFollower {
+		if r.Lead != None {
+			m.To = r.Lead
+			r.msgs = append(r.msgs, m)
+		}
+		return
+	}
 	for _, ent := range m.Entries {
 		r.appendEntry(ent)
 	}
@@ -703,7 +722,14 @@ func (r *Raft) maybeCommit() bool {
 	}
 	sort.Sort(sort.Reverse(matches))
 	commit := matches[r.quorum()-1]
-	if commit > r.RaftLog.committed && r.RaftLog.entries[commit].Term == r.Term {
+	term, err := r.RaftLog.Term(commit)
+	if commit <= r.RaftLog.committed {
+		return false
+	}
+	if err != nil {
+		log.Panicf("#%v, fails to get commit index's term, [error:%v]", r.id, err)
+	}
+	if term == r.Term {
 		r.RaftLog.committed = commit
 		return true
 	}
@@ -721,10 +747,10 @@ func (r *Raft) softState() *SoftState {
 	}
 }
 
-func (r *Raft) hardState() *pb.HardState {
-	hardState, _, err := r.RaftLog.storage.InitialState()
-	if err != nil {
-		log.Panicf("#%v, fails to get hard state, [error:%v]", r.id, err)
+func (r *Raft) newHardState() *pb.HardState {
+	return &pb.HardState{
+		Term:   r.Term,
+		Vote:   r.Vote,
+		Commit: r.RaftLog.committed,
 	}
-	return &hardState
 }
