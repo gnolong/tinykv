@@ -180,3 +180,7 @@ func (l *RaftLog) MustTerm(i uint64) uint64 {
 func (l *RaftLog) GetLastIncludedIndexAndTerm() (index, term uint64) {
 	return l.entries[0].Index, l.entries[0].Term
 }
+
+func (l *RaftLog) GetOffset(index uint64) uint64 {
+	return index - l.entries[0].Index
+}

@@ -442,7 +442,7 @@ func (ps *PeerStorage) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraftp
 	cur := 0
 	for _, entry := range entries {
 		if entry.Index != ps.AppliedIndex()+1 {
-			log.Infof("%v try to apply entries wrong", ps.Tag)
+			log.Panicf("%v try to apply entries wrong", ps.Tag)
 			cur++
 			continue
 		}

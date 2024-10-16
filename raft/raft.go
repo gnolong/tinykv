@@ -234,8 +234,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 	next := r.Prs[to].Next
 	if next > r.Prs[r.id].Next {
-		log.Panicf("#%v, follower's next index greater leader's next index, [to:%v]",
-			r.id, to)
+		log.Panicf("#%v, follower %v has greater next index[next:%v,match:%v], [next:%v,match:%v]",
+			r.id, to, next, r.Prs[to].Match, r.Prs[r.id].Next, r.Prs[r.id].Match)
 	}
 	m.Index = next - 1
 	m.LogTerm = r.RaftLog.MustTerm(m.Index)
@@ -488,7 +488,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			} else {
 				term := r.RaftLog.MustTerm(ent.Index)
 				if term != ent.Term {
-					r.RaftLog.entries = r.RaftLog.entries[:ent.Index]
+					offset := int(r.RaftLog.GetOffset(ent.Index))
+					r.RaftLog.entries = r.RaftLog.entries[:offset]
 					// update stabled index
 					r.RaftLog.stabled = min(r.RaftLog.stabled, ent.Index-1)
 					r.RaftLog.entries = append(r.RaftLog.entries, *ent)
@@ -509,6 +510,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None)
+		return
+	}
+	if m.Term < r.Term {
 		return
 	}
 	if r.State != StateLeader {
@@ -574,7 +578,11 @@ func (r *Raft) handleHeatbeatResponse(m pb.Message) {
 	}
 	if m.Term < r.Term || r.Prs[m.From].Match < r.Prs[r.id].Match {
 		// followers don't have update-to-date logs
-		r.sendAppend(m.From)
+		// r.sendAppend(m.From)
+		if r.State != StateLeader {
+			return
+		}
+		r.bcastAppend()
 	}
 }
 
@@ -704,8 +712,8 @@ func (r *Raft) appendEntry(ent *pb.Entry) {
 	ent.Term = r.Term
 	ent.Index = p.Next
 	r.RaftLog.entries = append(r.RaftLog.entries, *ent)
-	p.Match++
-	p.Next++
+	p.Match = r.RaftLog.LastIndex()
+	p.Next = p.Match + 1
 	r.maybeCommit()
 }
 

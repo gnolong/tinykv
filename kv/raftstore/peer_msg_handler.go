@@ -52,11 +52,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		if _, err := d.peerStorage.SaveReadyState(&rd); err != nil {
 			log.Panic(err)
 		}
-		for _, msg := range rd.Messages {
-			if err := d.peer.sendRaftMessage(msg, d.ctx.trans); err != nil {
-				log.Panic(err)
-			}
-		}
+		d.Send(d.ctx.trans, rd.Messages)
 		if len(rd.CommittedEntries) > 0 {
 			entries, err := d.peerStorage.appplyCommittedEntries(rd.CommittedEntries)
 			if err != nil {
@@ -69,87 +65,89 @@ func (d *peerMsgHandler) HandleRaftReady() {
 }
 
 func (d *peerMsgHandler) callbackProposals(entries []eraftpb.Entry) {
+	callbackEntry := func(entry eraftpb.Entry, p *proposal) {
+		if entry.EntryType == eraftpb.EntryType_EntryNormal {
+			var re raft_cmdpb.RaftCmdRequest
+			if err := proto.Unmarshal(entry.Data, &re); err != nil {
+				p.cb.Done(ErrResp(err))
+				return
+			}
+			res := newCmdResp()
+			for _, request := range re.Requests {
+				switch request.CmdType {
+				case raft_cmdpb.CmdType_Put:
+					res.Responses = append(res.Responses, &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Put,
+						Put:     &raft_cmdpb.PutResponse{},
+					})
+				case raft_cmdpb.CmdType_Delete:
+					res.Responses = append(res.Responses, &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Delete,
+						Delete:  &raft_cmdpb.DeleteResponse{},
+					})
+				case raft_cmdpb.CmdType_Get:
+					val, err := engine_util.GetCF(d.peerStorage.Engines.Kv, request.Get.Cf, request.Get.Key)
+					if err != nil {
+						res.Responses = append(res.Responses, &raft_cmdpb.Response{
+							CmdType: raft_cmdpb.CmdType_Invalid,
+						})
+					} else {
+						res.Responses = append(res.Responses, &raft_cmdpb.Response{
+							CmdType: raft_cmdpb.CmdType_Get,
+							Get: &raft_cmdpb.GetResponse{
+								Value: val,
+							},
+						})
+					}
+				case raft_cmdpb.CmdType_Snap:
+					res.Responses = append(res.Responses, &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Snap,
+						Snap: &raft_cmdpb.SnapResponse{
+							Region: d.Region(),
+						},
+					})
+					p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+				default:
+					res.Responses = append(res.Responses, &raft_cmdpb.Response{
+						CmdType: raft_cmdpb.CmdType_Invalid,
+					})
+				}
+			}
+			p.cb.Done(res)
+		}
+	}
+
 	if len(entries) == 0 {
 		return
 	}
 	// log.Infof("%v, callback input len:%v,[0]index:%v,term:%v", d.Tag, len(entries),entries[0].Index, entries[0].Term)
-	le := len(entries)
-	firstIndex := entries[0].Index
-	truncateOffset := 0
-	for i, p := range d.proposals {
-		if p.index < firstIndex {
-			truncateOffset = i + 1
-			p.cb.Done(ErrRespStaleCommand(d.Term()))
-			continue
-		}
-		offset := p.index - firstIndex
-		if offset < uint64(le) {
-			log.Infof("%v, callback entry index:%v,term:%v", d.Tag, entries[offset].Index, entries[offset].Term)
-			truncateOffset = i + 1
-			if entries[offset].Term > p.term {
-				p.cb.Done(ErrRespStaleCommand(d.Term()))
+	for _, entry := range entries {
+		for len(d.proposals) > 0 {
+			p := d.proposals[0]
+			proposal := p
+			if entry.Term < p.term {
+				break
+			}
+			if entry.Term > p.term {
+				p.cb.Done(ErrRespStaleCommand(entry.Term))
+				d.proposals = d.proposals[1:]
 				continue
-			} else if entries[offset].Term < p.term {
-				log.Panicf("%v proposal item has smaller term %v than raft log entry term %v with the same index %v",
-					d.Tag, p.term, entries[offset].Term, p.index)
-			} else {
-				entry := entries[offset]
-				if entry.EntryType == eraftpb.EntryType_EntryNormal {
-					var re raft_cmdpb.RaftCmdRequest
-					if err := proto.Unmarshal(entry.Data, &re); err != nil {
-						p.cb.Done(ErrResp(err))
-						continue
-					}
-					res := newCmdResp()
-					for _, request := range re.Requests {
-						switch request.CmdType {
-						case raft_cmdpb.CmdType_Put:
-							res.Responses = append(res.Responses, &raft_cmdpb.Response{
-								CmdType: raft_cmdpb.CmdType_Put,
-								Put:     &raft_cmdpb.PutResponse{},
-							})
-						case raft_cmdpb.CmdType_Delete:
-							res.Responses = append(res.Responses, &raft_cmdpb.Response{
-								CmdType: raft_cmdpb.CmdType_Delete,
-								Delete:  &raft_cmdpb.DeleteResponse{},
-							})
-						case raft_cmdpb.CmdType_Snap:
-							res.Responses = append(res.Responses, &raft_cmdpb.Response{
-								CmdType: raft_cmdpb.CmdType_Snap,
-								Snap:    &raft_cmdpb.SnapResponse{},
-							})
-						case raft_cmdpb.CmdType_Get:
-							val, err := engine_util.GetCF(d.peerStorage.Engines.Kv, request.Get.Cf, request.Get.Key)
-							if err != nil {
-								res.Responses = append(res.Responses, &raft_cmdpb.Response{
-									CmdType: raft_cmdpb.CmdType_Invalid,
-								})
-							} else {
-								res.Responses = append(res.Responses, &raft_cmdpb.Response{
-									CmdType: raft_cmdpb.CmdType_Get,
-									Get: &raft_cmdpb.GetResponse{
-										Value: val,
-									},
-								})
-							}
-						default:
-							res.Responses = append(res.Responses, &raft_cmdpb.Response{
-								CmdType: raft_cmdpb.CmdType_Invalid,
-							})
-						}
-					}
-					p.cb.Done(res)
-				}
+			}
+			if entry.Term == proposal.term && entry.Index < proposal.index {
+				break
+			}
+			if entry.Term == proposal.term && entry.Index > proposal.index {
+				proposal.cb.Done(ErrRespStaleCommand(entry.Term))
+				d.proposals = d.proposals[1:]
+				continue
+			}
+			if entry.Index == proposal.index && entry.Term == proposal.term {
+				callbackEntry(entry, p)
+				d.proposals = d.proposals[1:]
+				break
 			}
 		}
-
 	}
-	if truncateOffset < len(d.proposals) {
-		d.proposals = d.proposals[truncateOffset:]
-	} else {
-		d.proposals = make([]*proposal, 0)
-	}
-	// log.Infof("%v, proposals len:%v", d.Tag, len(d.proposals))
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -226,17 +224,18 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb.Done(ErrResp(err))
 		return
 	}
-	log.Warningf("%v, begin to proposals len:%v", d.Tag, len(d.proposals))
-	if err := d.RaftGroup.Propose(val); err != nil {
-		cb.Done(ErrResp(err))
-		return
-	}
+	// log.Warningf("%v, begin to proposals len:%v", d.Tag, len(d.proposals))
 	d.peer.proposals = append(d.peer.proposals, &proposal{
 		index: d.peer.nextProposalIndex(),
 		term:  d.peer.peerStorage.raftState.HardState.Term,
 		cb:    cb,
 	})
-	log.Warningf("%v, proposals len:%v,[0]:index:%v,term:%v", d.Tag, len(d.proposals), d.proposals[0].index, d.proposals[0].term)
+	// must be under above code!!!
+	if err := d.RaftGroup.Propose(val); err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+	// log.Warningf("%v, proposals len:%v,[0]:index:%v,term:%v", d.Tag, len(d.proposals), d.proposals[0].index, d.proposals[0].term)
 }
 
 func (d *peerMsgHandler) onTick() {

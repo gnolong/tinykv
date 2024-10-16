@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Connor1996/badger"
+
 	"github.com/pingcap-incubator/tinykv/kv/config"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore"
 	"github.com/pingcap-incubator/tinykv/kv/storage/raft_storage"
@@ -221,7 +222,7 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 			panic(fmt.Sprintf("can't get leader of region %d", regionID))
 		}
 		request.Header.Peer = leader
-		resp, txn := c.CallCommand(request, 1*time.Second)
+		resp, txn := c.CallCommand(request, 2*time.Second)
 		if resp == nil {
 			log.Debugf("can't call command %s on leader %d of region %d", request.String(), leader.GetId(), regionID)
 			newLeader := c.LeaderOfRegion(regionID)
