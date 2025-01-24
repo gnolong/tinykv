@@ -165,6 +165,8 @@ func (rn *RawNode) Ready() Ready {
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
 		Messages:         msgs,
+		// snapshot
+		Snapshot:         *rn.Raft.RaftLog.pendingSnapshot,
 	}
 	if !isHardStateEqual(*hard, rn.preHardState) {
 		ready.HardState = *hard
@@ -194,6 +196,9 @@ func (rn *RawNode) HasReady() bool {
 			len(ready.Messages) != 0 {
 			return false
 		}
+		if !isEmptySnapshot(&ready.Snapshot) {
+			return false
+		}
 		return true
 	}
 	return !isPending()
@@ -218,6 +223,14 @@ func (rn *RawNode) Advance(rd Ready) {
 	if le != 0 {
 		rn.Raft.RaftLog.applied = rd.CommittedEntries[le-1].Index
 	}
+	// reset pending snapshot var in raftLog
+	if !isEmptySnapshot(&rd.Snapshot) {
+		if rn.Raft.RaftLog.pendingSnapshot != nil && 
+			rd.Snapshot.Metadata.Index == rn.Raft.RaftLog.pendingSnapshot.Metadata.Index &&
+			rd.Snapshot.Metadata.Term == rn.Raft.RaftLog.pendingSnapshot.Metadata.Term {
+			rn.Raft.RaftLog.pendingSnapshot = nil
+		}
+	}
 }
 
 // GetProgress return the Progress of this node and its peers, if this
@@ -235,4 +248,11 @@ func (rn *RawNode) GetProgress() map[uint64]Progress {
 // TransferLeader tries to transfer leadership to the given transferee.
 func (rn *RawNode) TransferLeader(transferee uint64) {
 	_ = rn.Raft.Step(pb.Message{MsgType: pb.MessageType_MsgTransferLeader, From: transferee})
+}
+
+func isEmptySnapshot(s *pb.Snapshot) bool {
+	if s == nil || s.Metadata == nil || s.Metadata.Index == 0 {
+		return true
+	}
+	return false
 }

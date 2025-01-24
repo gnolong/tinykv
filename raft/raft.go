@@ -238,12 +238,13 @@ func (r *Raft) sendAppend(to uint64) bool {
 			r.id, to, next, r.Prs[to].Match, r.Prs[r.id].Next, r.Prs[r.id].Match)
 	}
 	m.Index = next - 1
-	m.LogTerm = r.RaftLog.MustTerm(m.Index)
 	lastIncludedIndex, _ := r.RaftLog.GetLastIncludedIndexAndTerm()
 	if next <= lastIncludedIndex {
-		log.Fatalf("#%v, fails to get previous log match index, [to:%v]",
-			r.id, to)
+		// request follower to install a snapshot
+		r.sendSnapshot(to)
+		return true
 	}
+	m.LogTerm = r.RaftLog.MustTerm(m.Index)
 	offset := next - lastIncludedIndex
 	if offset < uint64(len(r.RaftLog.entries)) {
 		entris := r.RaftLog.entries[offset:]
@@ -253,6 +254,22 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 	r.msgs = append(r.msgs, m)
 	return true
+}
+
+func (r *Raft) sendSnapshot(to uint64) {
+	log.Warningf("#%v, send a snapshot installing request, [to:%v]",r.id, to)
+	m := pb.Message{
+		MsgType: pb.MessageType_MsgSnapshot,
+		Term: r.Term,
+		To: to,
+		From: r.id,
+	}
+	snapshot, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		log.Warningf("#%v, get snapshot failure", r.id)
+	}
+	m.Snapshot = &snapshot
+	r.msgs = append(r.msgs, m)
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -589,6 +606,31 @@ func (r *Raft) handleHeatbeatResponse(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	if r.Term > m.Term {
+		return
+	}
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, m.From)
+	}
+	// to candidates
+	if r.State == StateCandidate {
+		r.becomeFollower(m.Term, m.From)
+	} else if r.State == StateFollower {
+		r.Lead = m.From
+	}
+	// reset election elapsed time
+	r.electionElapsed = 0
+
+	// check snapshot
+	lastIncludedIndex, _ := r.RaftLog.GetLastIncludedIndexAndTerm()
+	metaData := m.Snapshot.Metadata
+	if metaData == nil || metaData.Index <= lastIncludedIndex {
+		return
+	}
+	lastIndex := r.RaftLog.LastIndex()
+	if metaData.Index > lastIndex {
+		
+	}
 }
 
 func (r *Raft) handleRequestVote(m pb.Message) {
