@@ -100,6 +100,7 @@ func newLog(storage Storage) *RaftLog {
 			}
 			l.entries = append(l.entries, entries...)
 		}
+		l.applied = snap.Metadata.Index
 	}
 	return l
 }

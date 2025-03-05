@@ -216,8 +216,9 @@ func newRaft(c *Config) *Raft {
 		initPrs(r, confState.Nodes)
 	}
 	r.RaftLog = newLog(c.Storage)
-	r.RaftLog.applied = c.Applied
-
+	if r.RaftLog.applied < c.Applied {
+		r.RaftLog.applied = c.Applied
+	}
 	return r
 }
 
@@ -257,12 +258,12 @@ func (r *Raft) sendAppend(to uint64) bool {
 }
 
 func (r *Raft) sendSnapshot(to uint64) {
-	log.Warningf("#%v, send a snapshot installing request, [to:%v]",r.id, to)
+	//log.Warningf("#%v, send a snapshot installing request, [to:%v]", r.id, to)
 	m := pb.Message{
 		MsgType: pb.MessageType_MsgSnapshot,
-		Term: r.Term,
-		To: to,
-		From: r.id,
+		Term:    r.Term,
+		To:      to,
+		From:    r.id,
 	}
 	snapshot, err := r.RaftLog.storage.Snapshot()
 	if err != nil {
@@ -449,6 +450,8 @@ func (r *Raft) Step(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handleHeatbeatResponse(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	}
 	return nil
 }
@@ -628,8 +631,28 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		return
 	}
 	lastIndex := r.RaftLog.LastIndex()
-	if metaData.Index > lastIndex {
-		
+	if lastIncludedIndex <= metaData.Index && metaData.Index <= lastIndex &&
+		metaData.Term == r.RaftLog.MustTerm(metaData.Index) {
+		if lastIncludedIndex < metaData.Index {
+			r.followerUpdatePrs(metaData.ConfState.Nodes)
+			r.RaftLog.entries = r.RaftLog.entries[r.RaftLog.GetOffset(metaData.Index):]
+			r.RaftLog.pendingSnapshot = m.Snapshot
+			r.RaftLog.committed = max(r.RaftLog.committed, metaData.Index)
+			r.RaftLog.applied = r.RaftLog.committed
+			r.RaftLog.stabled = max(r.RaftLog.stabled, metaData.Index)
+		}
+	} else {
+		r.followerUpdatePrs(metaData.ConfState.Nodes)
+		r.RaftLog.pendingSnapshot = m.Snapshot
+		r.RaftLog.entries = []pb.Entry{
+			{
+				Index: metaData.Index,
+				Term:  metaData.Term,
+			},
+		}
+		r.RaftLog.committed = metaData.Index
+		r.RaftLog.applied = r.RaftLog.committed
+		r.RaftLog.stabled = metaData.Index
 	}
 }
 
@@ -802,5 +825,12 @@ func (r *Raft) newHardState() *pb.HardState {
 		Term:   r.Term,
 		Vote:   r.Vote,
 		Commit: r.RaftLog.committed,
+	}
+}
+
+func (r *Raft) followerUpdatePrs(nodes []uint64) {
+	r.Prs = map[uint64]*Progress{}
+	for _, node := range nodes {
+		r.Prs[node] = &Progress{}
 	}
 }

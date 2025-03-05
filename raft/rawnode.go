@@ -165,14 +165,15 @@ func (rn *RawNode) Ready() Ready {
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
 		Messages:         msgs,
-		// snapshot
-		Snapshot:         *rn.Raft.RaftLog.pendingSnapshot,
 	}
 	if !isHardStateEqual(*hard, rn.preHardState) {
 		ready.HardState = *hard
 	}
 	if !isSoftStateEqual(*soft, rn.preSoftState) {
 		ready.SoftState = soft
+	}
+	if !IsEmptySnap(&ready.Snapshot) {
+		ready.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
 	}
 	return ready
 }
@@ -225,7 +226,7 @@ func (rn *RawNode) Advance(rd Ready) {
 	}
 	// reset pending snapshot var in raftLog
 	if !isEmptySnapshot(&rd.Snapshot) {
-		if rn.Raft.RaftLog.pendingSnapshot != nil && 
+		if rn.Raft.RaftLog.pendingSnapshot != nil &&
 			rd.Snapshot.Metadata.Index == rn.Raft.RaftLog.pendingSnapshot.Metadata.Index &&
 			rd.Snapshot.Metadata.Term == rn.Raft.RaftLog.pendingSnapshot.Metadata.Term {
 			rn.Raft.RaftLog.pendingSnapshot = nil
