@@ -58,6 +58,10 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			if err != nil {
 				log.Panic(err)
 			}
+
+			// async compact log
+			d.ScheduleCompactLog(d.peerStorage.truncatedIndex())
+
 			d.callbackProposals(entries)
 		}
 		d.RaftGroup.Advance(rd)

@@ -270,6 +270,8 @@ func (r *Raft) sendSnapshot(to uint64) {
 		log.Warningf("#%v, get snapshot failure", r.id)
 	}
 	m.Snapshot = &snapshot
+	// index := m.Snapshot.Metadata.Index
+	// r.RaftLog.entries = r.RaftLog.entries[r.RaftLog.GetOffset(index):]
 	r.msgs = append(r.msgs, m)
 }
 

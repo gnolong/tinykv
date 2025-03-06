@@ -368,7 +368,36 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+
+	ch := make(chan bool, 1)
+	ps.snapState = snap.SnapState{
+		StateType: snap.SnapState_Applying,
+		Receiver:  nil,
+	}
+	ps.regionSched <- runner.RegionTaskApply{
+		RegionId: ps.region.GetId(),
+		Notifier: ch,
+	}
+	applied := <-ch
+	if applied {
+		newRegion := snapData.Region
+		newRegion.Id = ps.region.GetId()
+		ps.clearExtraData(newRegion)
+		ps.region = newRegion
+
+		if err := ps.clearMeta(kvWB, raftWB); err != nil {
+			return nil, fmt.Errorf("clear meta failed: %v", err)
+		}
+		ps.applyState.AppliedIndex = snapshot.Metadata.Index
+		ps.applyState.TruncatedState = &rspb.RaftTruncatedState{
+			Index: snapshot.Metadata.Index,
+			Term:  snapshot.Metadata.Term,
+		}
+		kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState)
+		ps.snapState.StateType = snap.SnapState_Relax
+		return nil, nil
+	}
+	return nil, fmt.Errorf("appling snapshot failed")
 }
 
 // Save memory states to disk.
@@ -394,6 +423,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	}
 
 	raftWB := new(engine_util.WriteBatch)
+	kvWB := new(engine_util.WriteBatch)
 	raftState := deepCopyRaftState()
 	// persist raft hard state
 	if !raft.IsEmptyHardState(ready.HardState) {
@@ -406,6 +436,15 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 			return nil, err
 		}
 	}
+	if ready.Snapshot.Metadata != nil && ready.Snapshot.Metadata.Index != 0 {
+		ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+	}
+	if kvWB.Len() > 0 {
+		if err := ps.Engines.WriteKV(kvWB); err != nil {
+			// TODO: discard the applyState change
+			return nil, err
+		}
+	}
 	if raftWB.Len() > 0 {
 		if err := ps.Engines.WriteRaft(raftWB); err != nil {
 			// discard ps.raftState
@@ -413,7 +452,6 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 			return nil, err
 		}
 	}
-
 	return nil, nil
 }
 
@@ -430,7 +468,7 @@ func (ps *PeerStorage) clearRange(regionID uint64, start, end []byte) {
 }
 
 func (ps *PeerStorage) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraftpb.Entry, error) {
-	log.Debugf("#%v begin to apply committed entries", ps.Tag)
+	// log.Debugf("#%v begin to apply committed entries", ps.Tag)
 	le := len(entries)
 	// if le <= 0 {
 	// 	log.Debugf("%v committed entries is empty", ps.Tag)
@@ -468,6 +506,16 @@ func (ps *PeerStorage) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraftp
 					batch.SetCF(request.Put.Cf, request.Put.Key, request.Put.Value)
 				case raft_cmdpb.CmdType_Delete:
 					batch.DeleteCF(request.Delete.Cf, request.Delete.Key)
+				}
+			}
+			if re.AdminRequest != nil {
+				switch re.AdminRequest.CmdType {
+				case raft_cmdpb.AdminCmdType_CompactLog:
+					if ps.applyState.TruncatedState == nil {
+						ps.applyState.TruncatedState = &rspb.RaftTruncatedState{}
+					}
+					ps.applyState.TruncatedState.Index = entry.Index
+					ps.applyState.TruncatedState.Term = entry.Term
 				}
 			}
 		}
