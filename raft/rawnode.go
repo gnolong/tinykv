@@ -172,7 +172,7 @@ func (rn *RawNode) Ready() Ready {
 	if !isSoftStateEqual(*soft, rn.preSoftState) {
 		ready.SoftState = soft
 	}
-	if !IsEmptySnap(&ready.Snapshot) {
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
 		ready.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
 	}
 	return ready
@@ -230,6 +230,12 @@ func (rn *RawNode) Advance(rd Ready) {
 			rd.Snapshot.Metadata.Index == rn.Raft.RaftLog.pendingSnapshot.Metadata.Index &&
 			rd.Snapshot.Metadata.Term == rn.Raft.RaftLog.pendingSnapshot.Metadata.Term {
 			rn.Raft.RaftLog.pendingSnapshot = nil
+		}
+		if rd.Snapshot.Metadata.Index > rn.Raft.RaftLog.applied {
+			rn.Raft.RaftLog.applied = rd.Snapshot.Metadata.Index
+		}
+		if rd.Snapshot.Metadata.Index > rn.Raft.RaftLog.stabled {
+			rn.Raft.RaftLog.stabled = rd.Snapshot.Metadata.Index
 		}
 	}
 }

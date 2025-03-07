@@ -54,13 +54,16 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		}
 		d.Send(d.ctx.trans, rd.Messages)
 		if len(rd.CommittedEntries) > 0 {
+			oldTruncatedIndex := d.peerStorage.truncatedIndex()
 			entries, err := d.peerStorage.appplyCommittedEntries(rd.CommittedEntries)
 			if err != nil {
 				log.Panic(err)
 			}
 
 			// async compact log
-			d.ScheduleCompactLog(d.peerStorage.truncatedIndex())
+			if oldTruncatedIndex < d.peerStorage.truncatedIndex() {
+				d.ScheduleCompactLog(d.peerStorage.truncatedIndex())
+			}
 
 			d.callbackProposals(entries)
 		}

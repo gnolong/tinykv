@@ -15,8 +15,7 @@
 package raft
 
 import (
-	"log"
-
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -84,24 +83,24 @@ func newLog(storage Storage) *RaftLog {
 		}
 		l.entries[0].Term = term
 	}
-	snap, err := storage.Snapshot()
-	if err != nil && err != ErrSnapshotTemporarilyUnavailable {
-		log.Fatalf("fails to new raft log, [error:%v]", err)
-	}
-	if snap.Metadata != nil {
-		l.entries[0].Term = snap.Metadata.Term
-		l.entries[0].Index = snap.Metadata.Index
-		l.entries = l.entries[:1]
-		index := l.entries[0].Index + 1
-		if lastIndex >= index {
-			entries, err := storage.Entries(index, lastIndex+1)
-			if err != nil {
-				log.Fatalf("fails to new raft log, [error:%v]", err)
-			}
-			l.entries = append(l.entries, entries...)
-		}
-		l.applied = snap.Metadata.Index
-	}
+	// snap, err := storage.Snapshot()
+	// if err != nil && err != ErrSnapshotTemporarilyUnavailable {
+	// 	log.Fatalf("fails to new raft log, [error:%v]", err)
+	// }
+	// if snap.Metadata != nil {
+	// 	l.entries[0].Term = snap.Metadata.Term
+	// 	l.entries[0].Index = snap.Metadata.Index
+	// 	l.entries = l.entries[:1]
+	// 	index := l.entries[0].Index + 1
+	// 	if lastIndex >= index {
+	// 		entries, err := storage.Entries(index, lastIndex+1)
+	// 		if err != nil {
+	// 			log.Fatalf("fails to new raft log, [error:%v]", err)
+	// 		}
+	// 		l.entries = append(l.entries, entries...)
+	// 	}
+	// 	l.applied = snap.Metadata.Index
+	// }
 	return l
 }
 
@@ -110,6 +109,14 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+
+	// trucated index indicates the last gc index
+	// snapshot.index may be greater than truncated index, snapshot.index may be persisted applied index
+	firstIndex, _ := l.storage.FirstIndex()
+	firstIndex--
+	if firstIndex > l.entries[0].Index {
+		l.entries = l.entries[firstIndex-l.entries[0].Index:]
+	}
 }
 
 // allEntries return all the entries not compacted.
@@ -129,14 +136,15 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	index, _ := l.GetLastIncludedIndexAndTerm()
 	offset := int(l.stabled - index)
 	if offset < 0 {
-		panic("stabled index less last included index")
+		offset = 0
 	}
 	le := len(l.entries)
-	if offset+1 == le {
+	if offset+1 > le {
+		log.Warningf("stabled index out bound of raft log entries,[%v, len: %v]", offset+1, le)
 		return []pb.Entry{}
 	}
-	if offset+1 > le {
-		log.Panicf("stabled index out bound of raft log entries,[%v, len: %v]", offset+1, le)
+	if offset+1 == le {
+		return []pb.Entry{}
 	}
 	return l.entries[offset+1:]
 }
@@ -145,10 +153,14 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
 	index, _ := l.GetLastIncludedIndexAndTerm()
-	if l.applied == l.committed {
+	applied := l.applied
+	if index >= applied {
+		applied = index
+	}
+	if applied >= l.committed {
 		return []pb.Entry{}
 	}
-	return l.entries[l.applied-index+1 : l.committed-index+1]
+	return l.entries[applied-index+1 : l.committed-index+1]
 }
 
 // LastIndex return the last index of the log entries

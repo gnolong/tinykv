@@ -238,13 +238,14 @@ func (r *Raft) sendAppend(to uint64) bool {
 		log.Panicf("#%v, follower %v has greater next index[next:%v,match:%v], [next:%v,match:%v]",
 			r.id, to, next, r.Prs[to].Match, r.Prs[r.id].Next, r.Prs[r.id].Match)
 	}
-	m.Index = next - 1
+	r.RaftLog.maybeCompact()
 	lastIncludedIndex, _ := r.RaftLog.GetLastIncludedIndexAndTerm()
 	if next <= lastIncludedIndex {
 		// request follower to install a snapshot
 		r.sendSnapshot(to)
 		return true
 	}
+	m.Index = next - 1
 	m.LogTerm = r.RaftLog.MustTerm(m.Index)
 	offset := next - lastIncludedIndex
 	if offset < uint64(len(r.RaftLog.entries)) {
@@ -266,12 +267,13 @@ func (r *Raft) sendSnapshot(to uint64) {
 		From:    r.id,
 	}
 	snapshot, err := r.RaftLog.storage.Snapshot()
+	for err != nil && err == ErrSnapshotTemporarilyUnavailable {
+		snapshot, err = r.RaftLog.storage.Snapshot()
+	}
 	if err != nil {
-		log.Warningf("#%v, get snapshot failure", r.id)
+		log.Panicf("#%v, get snapshot failure", r.id)
 	}
 	m.Snapshot = &snapshot
-	// index := m.Snapshot.Metadata.Index
-	// r.RaftLog.entries = r.RaftLog.entries[r.RaftLog.GetOffset(index):]
 	r.msgs = append(r.msgs, m)
 }
 
@@ -611,7 +613,20 @@ func (r *Raft) handleHeatbeatResponse(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	appendResponse := func(reject bool, t, in uint64) {
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgAppendResponse,
+			Term:    r.Term,
+			To:      m.From,
+			From:    r.id,
+			Reject:  reject,
+			LogTerm: t,
+			Index:   in,
+		})
+	}
+
 	if r.Term > m.Term {
+		appendResponse(true, 0, 0)
 		return
 	}
 	if m.Term > r.Term {
@@ -628,11 +643,12 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 
 	// check snapshot
 	lastIncludedIndex, _ := r.RaftLog.GetLastIncludedIndexAndTerm()
+	lastTerm, lastIndex := r.getLastTermAndIndex()
 	metaData := m.Snapshot.Metadata
 	if metaData == nil || metaData.Index <= lastIncludedIndex {
+		appendResponse(true, lastTerm, lastIndex)
 		return
 	}
-	lastIndex := r.RaftLog.LastIndex()
 	if lastIncludedIndex <= metaData.Index && metaData.Index <= lastIndex &&
 		metaData.Term == r.RaftLog.MustTerm(metaData.Index) {
 		if lastIncludedIndex < metaData.Index {
@@ -640,8 +656,10 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 			r.RaftLog.entries = r.RaftLog.entries[r.RaftLog.GetOffset(metaData.Index):]
 			r.RaftLog.pendingSnapshot = m.Snapshot
 			r.RaftLog.committed = max(r.RaftLog.committed, metaData.Index)
-			r.RaftLog.applied = r.RaftLog.committed
 			r.RaftLog.stabled = max(r.RaftLog.stabled, metaData.Index)
+		} else {
+			appendResponse(true, lastTerm, lastIndex)
+			return
 		}
 	} else {
 		r.followerUpdatePrs(metaData.ConfState.Nodes)
@@ -653,9 +671,10 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 			},
 		}
 		r.RaftLog.committed = metaData.Index
-		r.RaftLog.applied = r.RaftLog.committed
 		r.RaftLog.stabled = metaData.Index
 	}
+	lastTerm, lastIndex = r.getLastTermAndIndex()
+	appendResponse(false, lastTerm, lastIndex)
 }
 
 func (r *Raft) handleRequestVote(m pb.Message) {
