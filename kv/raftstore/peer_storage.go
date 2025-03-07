@@ -395,11 +395,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		}
 		ps.clearExtraData(newRegion)
 		ps.region = newRegion
-		lastIndex, _ := ps.LastIndex()
-		if lastIndex < snapshot.Metadata.Index {
-			ps.raftState.LastIndex = snapshot.Metadata.Index
-			ps.raftState.LastTerm = snapshot.Metadata.Term
-		}
 		ps.applyState.AppliedIndex = snapshot.Metadata.Index
 		ps.applyState.TruncatedState = &rspb.RaftTruncatedState{
 			Index: snapshot.Metadata.Index,
@@ -408,6 +403,12 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		if err := ps.clearMeta(kvWB, raftWB); err != nil {
 			return nil, fmt.Errorf("clear meta failed: %v", err)
 		}
+		// lastIndex, _ := ps.LastIndex()
+		// if lastIndex < snapshot.Metadata.Index {
+			ps.raftState.LastIndex = snapshot.Metadata.Index
+			ps.raftState.LastTerm = snapshot.Metadata.Term
+		// }
+		res.Region = newRegion
 		if err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState); err != nil {
 			return nil, err
 		}
@@ -416,7 +417,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 			return nil, err
 		}
 		ps.snapState.StateType = snap.SnapState_Relax
-		res.Region = newRegion
 		return res, nil
 	}
 	return nil, fmt.Errorf("appling snapshot failed")

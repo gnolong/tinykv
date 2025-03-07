@@ -656,7 +656,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 			r.RaftLog.entries = r.RaftLog.entries[r.RaftLog.GetOffset(metaData.Index):]
 			r.RaftLog.pendingSnapshot = m.Snapshot
 			r.RaftLog.committed = max(r.RaftLog.committed, metaData.Index)
-			r.RaftLog.stabled = max(r.RaftLog.stabled, metaData.Index)
+			r.RaftLog.stabled = metaData.Index
 		} else {
 			appendResponse(true, lastTerm, lastIndex)
 			return
