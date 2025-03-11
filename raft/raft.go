@@ -380,6 +380,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.electionElapsed = 0
 	r.randomizeElectionTimeout()
 	r.msgs = nil
+	r.leadTransferee = None
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -394,6 +395,7 @@ func (r *Raft) becomeCandidate() {
 	r.heartbeatElapsed = 0
 	r.randomizeElectionTimeout()
 	r.msgs = nil
+	r.leadTransferee = None
 }
 
 // becomeLeader transform this peer's state to leader
@@ -407,6 +409,7 @@ func (r *Raft) becomeLeader() {
 	r.electionElapsed = 0
 	r.randomizeElectionTimeout()
 	// r.msgs = nil
+	r.leadTransferee = None
 	match := r.RaftLog.LastIndex()
 	for id, pr := range r.Prs {
 		if id == r.id {
@@ -429,6 +432,7 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	r.lock()
 	defer r.unLock()
+	r.ifPromote()
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
 		if r.State != StateLeader {
@@ -456,6 +460,10 @@ func (r *Raft) Step(m pb.Message) error {
 		r.handleHeatbeatResponse(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransfer(m)
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleTimeoutNow(m)
 	}
 	return nil
 }
@@ -725,10 +733,52 @@ func (r *Raft) handlePropose(m pb.Message) {
 		}
 		return
 	}
+	if r.leadTransferee != None {
+		return
+	}
 	for _, ent := range m.Entries {
 		r.appendEntry(ent)
 	}
 	r.bcastAppend()
+}
+
+func (r *Raft) handleTransfer(m pb.Message) {
+	if r.State != StateLeader {
+		m.To = r.Lead
+		r.msgs = append(r.msgs, m)
+		return
+	}
+	r.leadTransferee = m.From
+	r.ifPromote()
+}
+
+func (r *Raft) ifPromote() {
+	if r.leadTransferee == None || r.leadTransferee == r.id {
+		return
+	}
+	if progress := r.Prs[r.leadTransferee]; progress == nil {
+		return
+	}
+	if r.Prs[r.leadTransferee].Match >= r.Prs[r.id].Match {
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgTimeoutNow,
+			To:      r.leadTransferee,
+			From:    r.id,
+			Term:    r.Term,
+		})
+	} else {
+		r.sendAppend(r.leadTransferee)
+	}
+}
+
+func (r *Raft) handleTimeoutNow(m pb.Message) {
+	if r.State != StateFollower || m.Term < r.Term {
+		return
+	}
+	if progress := r.Prs[r.id]; progress == nil {
+		return
+	}
+	r.campaign()
 }
 
 func (r *Raft) handleVoteCnt() {
@@ -754,11 +804,25 @@ func (r *Raft) handleVoteCnt() {
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; !ok {
+		progress := &Progress{}
+		if r.State == StateLeader {
+			progress.Next = r.RaftLog.LastIndex() + 1
+		}
+		r.Prs[id] = progress
+	}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	delete(r.Prs, id)
+	if id == r.id {
+		return
+	}
+	if r.State == StateLeader {
+		r.maybeCommit()
+	}
 }
 
 func (r *Raft) lock() {
@@ -797,6 +861,13 @@ func (r *Raft) appendEntry(ent *pb.Entry) {
 	// TODO: term should be from hardstate?
 	ent.Term = r.Term
 	ent.Index = p.Next
+	if ent.EntryType == pb.EntryType_EntryConfChange {
+		if r.PendingConfIndex > r.RaftLog.applied {
+			return
+		} else {
+			r.PendingConfIndex = ent.Index
+		}
+	}
 	r.RaftLog.entries = append(r.RaftLog.entries, *ent)
 	p.Match = r.RaftLog.LastIndex()
 	p.Next = p.Match + 1

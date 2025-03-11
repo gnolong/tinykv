@@ -394,20 +394,22 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 			PrevRegion: ps.region,
 		}
 		ps.clearExtraData(newRegion)
-		ps.region = newRegion
-		ps.applyState.AppliedIndex = snapshot.Metadata.Index
-		ps.applyState.TruncatedState = &rspb.RaftTruncatedState{
-			Index: snapshot.Metadata.Index,
-			Term:  snapshot.Metadata.Term,
-		}
+		// this function will delete all persisted raft logs
+		// so last index must be updated
 		if err := ps.clearMeta(kvWB, raftWB); err != nil {
 			return nil, fmt.Errorf("clear meta failed: %v", err)
 		}
 		// lastIndex, _ := ps.LastIndex()
 		// if lastIndex < snapshot.Metadata.Index {
-			ps.raftState.LastIndex = snapshot.Metadata.Index
-			ps.raftState.LastTerm = snapshot.Metadata.Term
+		ps.raftState.LastIndex = snapshot.Metadata.Index
+		ps.raftState.LastTerm = snapshot.Metadata.Term
 		// }
+		ps.applyState.AppliedIndex = snapshot.Metadata.Index
+		ps.applyState.TruncatedState = &rspb.RaftTruncatedState{
+			Index: snapshot.Metadata.Index,
+			Term:  snapshot.Metadata.Term,
+		}
+		ps.region = newRegion
 		res.Region = newRegion
 		if err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState); err != nil {
 			return nil, err
