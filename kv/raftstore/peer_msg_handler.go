@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -49,22 +50,31 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	// Your Code Here (2B).
 	if d.RaftGroup.HasReady() {
 		rd := d.RaftGroup.Ready()
-		if _, err := d.peerStorage.SaveReadyState(&rd); err != nil {
+		var err error
+		var res *ApplySnapResult
+		if res, err = d.peerStorage.SaveReadyState(&rd); err != nil {
 			log.Panic(err)
+		}
+		if res != nil && !reflect.DeepEqual(res.PrevRegion, res.Region){
+			meta := d.ctx.storeMeta
+			meta.Lock()
+			meta.setRegion(res.Region, d.peer)
+			meta.regionRanges.ReplaceOrInsert(&regionItem{region: res.Region})
+			meta.Unlock()
 		}
 		d.Send(d.ctx.trans, rd.Messages)
 		if len(rd.CommittedEntries) > 0 {
-			oldTruncatedIndex := d.peerStorage.truncatedIndex()
-			entries, err := d.peerStorage.appplyCommittedEntries(rd.CommittedEntries)
+			entries, err := d.appplyCommittedEntries(rd.CommittedEntries)
 			if err != nil {
 				log.Panic(err)
 			}
-
+			if d.stopped {
+				return
+			}
 			// async compact log
-			if oldTruncatedIndex < d.peerStorage.truncatedIndex() {
+			if d.LastCompactedIdx <= d.peerStorage.truncatedIndex() {
 				d.ScheduleCompactLog(d.peerStorage.truncatedIndex())
 			}
-
 			d.callbackProposals(entries)
 		}
 		d.RaftGroup.Advance(rd)
@@ -119,6 +129,21 @@ func (d *peerMsgHandler) callbackProposals(entries []eraftpb.Entry) {
 						CmdType: raft_cmdpb.CmdType_Invalid,
 					})
 				}
+			}
+			p.cb.Done(res)
+		} else if entry.EntryType == eraftpb.EntryType_EntryConfChange {
+			confChange := &eraftpb.ConfChange{}
+			if err := proto.Unmarshal(entry.Data, confChange); err != nil {
+				p.cb.Done(ErrResp(err))
+				return
+			}
+			res := newCmdResp()
+			res.Header.CurrentTerm = entry.Term
+			res.AdminResponse = &raft_cmdpb.AdminResponse{
+				CmdType: raft_cmdpb.AdminCmdType_ChangePeer,
+				ChangePeer: &raft_cmdpb.ChangePeerResponse{
+					Region: d.Region(),
+				},
 			}
 			p.cb.Done(res)
 		}
@@ -225,6 +250,31 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb.Done(ErrResp(err))
 		return
 	}
+	if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_TransferLeader &&
+		msg.AdminRequest.TransferLeader != nil{
+		d.RaftGroup.TransferLeader(msg.AdminRequest.TransferLeader.Peer.Id)
+		res := newCmdResp()
+		res.Header.CurrentTerm = d.peer.peerStorage.raftState.HardState.Term
+		res.AdminResponse = &raft_cmdpb.AdminResponse{
+			CmdType: raft_cmdpb.AdminCmdType_TransferLeader,
+		}
+		cb.Done(res)
+		return
+	}
+	// useful in unreliable network !!!
+	if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_ChangePeer &&
+	msg.AdminRequest.ChangePeer != nil{
+		if msg.AdminRequest.ChangePeer.ChangeType == eraftpb.ConfChangeType_RemoveNode &&
+			d.IsLeader() && len(d.Region().Peers) == 2 && msg.AdminRequest.ChangePeer.Peer.Id == d.PeerId(){
+			for _, p := range d.Region().Peers{
+				if p.Id != d.PeerId(){
+					d.RaftGroup.TransferLeader(p.Id)
+				}
+			}
+			cb.Done(ErrResp(errors.New("can not remove leader peer of two peers region")))
+			return
+		}
+	}
 	// Your Code Here (2B).
 	val, err := proto.Marshal(msg)
 	if err != nil {
@@ -237,6 +287,18 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		term:  d.peer.peerStorage.raftState.HardState.Term,
 		cb:    cb,
 	})
+	if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_ChangePeer &&
+		msg.AdminRequest.ChangePeer != nil{
+		if err := d.RaftGroup.ProposeConfChange(eraftpb.ConfChange{
+			ChangeType: msg.AdminRequest.ChangePeer.ChangeType,
+			NodeId: msg.AdminRequest.ChangePeer.Peer.Id,
+			Context: []byte{uint8(msg.AdminRequest.ChangePeer.Peer.StoreId)},
+		}); err != nil {
+			cb.Done(ErrResp(err))
+		}
+		log.Infof("%v %s peer %v", d.Tag, msg.AdminRequest.ChangePeer.ChangeType, msg.AdminRequest.ChangePeer.Peer)
+		return
+	}
 	// must be under above code!!!
 	if err := d.RaftGroup.Propose(val); err != nil {
 		cb.Done(ErrResp(err))

@@ -744,8 +744,6 @@ func (r *Raft) handlePropose(m pb.Message) {
 
 func (r *Raft) handleTransfer(m pb.Message) {
 	if r.State != StateLeader {
-		m.To = r.Lead
-		r.msgs = append(r.msgs, m)
 		return
 	}
 	r.leadTransferee = m.From
@@ -754,6 +752,7 @@ func (r *Raft) handleTransfer(m pb.Message) {
 
 func (r *Raft) ifPromote() {
 	if r.leadTransferee == None || r.leadTransferee == r.id {
+		r.leadTransferee = None
 		return
 	}
 	if progress := r.Prs[r.leadTransferee]; progress == nil {
@@ -805,9 +804,8 @@ func (r *Raft) handleVoteCnt() {
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
 	if _, ok := r.Prs[id]; !ok {
-		progress := &Progress{}
-		if r.State == StateLeader {
-			progress.Next = r.RaftLog.LastIndex() + 1
+		progress := &Progress{
+			Next: r.RaftLog.LastIndex() + 1,
 		}
 		r.Prs[id] = progress
 	}

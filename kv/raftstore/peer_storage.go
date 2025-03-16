@@ -382,7 +382,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		Receiver:  nil,
 	}
 	ps.regionSched <- &runner.RegionTaskApply{
-		RegionId: ps.region.GetId(),
+		RegionId: newRegion.GetId(),
 		Notifier: ch,
 		SnapMeta: snapshot.Metadata,
 		StartKey: newRegion.GetStartKey(),
@@ -399,22 +399,19 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		if err := ps.clearMeta(kvWB, raftWB); err != nil {
 			return nil, fmt.Errorf("clear meta failed: %v", err)
 		}
-		// lastIndex, _ := ps.LastIndex()
-		// if lastIndex < snapshot.Metadata.Index {
 		ps.raftState.LastIndex = snapshot.Metadata.Index
 		ps.raftState.LastTerm = snapshot.Metadata.Term
-		// }
 		ps.applyState.AppliedIndex = snapshot.Metadata.Index
 		ps.applyState.TruncatedState = &rspb.RaftTruncatedState{
 			Index: snapshot.Metadata.Index,
 			Term:  snapshot.Metadata.Term,
 		}
-		ps.region = newRegion
+		// ps.region = newRegion
 		res.Region = newRegion
 		if err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState); err != nil {
 			return nil, err
 		}
-		meta.WriteRegionState(kvWB, ps.region, 0)
+		meta.WriteRegionState(kvWB, newRegion, 0)
 		if err := kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState); err != nil {
 			return nil, err
 		}
@@ -448,9 +445,11 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 
 	raftWB := new(engine_util.WriteBatch)
 	kvWB := new(engine_util.WriteBatch)
+	var err error
+	var res *ApplySnapResult
 	// raftState := deepCopyRaftState()
 	if ready.Snapshot.Metadata != nil && ready.Snapshot.Metadata.Index != 0 {
-		_, err := ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+		res, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
 		if err != nil {
 			return nil, err
 		}
@@ -481,7 +480,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 			return nil, err
 		}
 	}
-	return nil, nil
+	return res, nil
 }
 
 func (ps *PeerStorage) ClearData() {
@@ -496,7 +495,8 @@ func (ps *PeerStorage) clearRange(regionID uint64, start, end []byte) {
 	}
 }
 
-func (ps *PeerStorage) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraftpb.Entry, error) {
+func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraftpb.Entry, error) {
+	ps := d.peer.peerStorage
 	// log.Debugf("#%v begin to apply committed entries", ps.Tag)
 	le := len(entries)
 	// if le <= 0 {
@@ -520,6 +520,7 @@ func (ps *PeerStorage) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraftp
 	} else {
 		entries = make([]eraftpb.Entry, 0)
 	}
+	var confChange *eraftpb.ConfChange
 	for _, entry := range entries {
 		if entry.Index != ps.AppliedIndex()+1 {
 			log.Panicf("%v try to apply entries wrong", ps.Tag)
@@ -547,6 +548,39 @@ func (ps *PeerStorage) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraftp
 					ps.applyState.TruncatedState.Term = entry.Term
 				}
 			}
+		} else if entry.EntryType == eraftpb.EntryType_EntryConfChange {
+			newRegion := &metapb.Region{}
+			util.CloneMsg(ps.region, newRegion)
+			newRegion.RegionEpoch.ConfVer++
+			confChange = &eraftpb.ConfChange{}
+			if err := proto.Unmarshal(entry.Data, confChange); err != nil {
+				return nil, err
+			}
+			targetPeer := &metapb.Peer{Id: confChange.NodeId, StoreId: uint64(confChange.Context[0])}
+			if confChange.ChangeType == eraftpb.ConfChangeType_AddNode {
+				found := util.FindPeer(newRegion, targetPeer.StoreId)
+				if found != nil && (found.Id == targetPeer.Id || found.StoreId == targetPeer.StoreId) {
+					log.Panicf("%v add peer %v again", ps.Tag, targetPeer)
+				}
+				newRegion.Peers = append(newRegion.Peers, targetPeer)
+				// update router info to send messages to the new peer later
+				// like first heartbeat message.
+				d.insertPeerCache(targetPeer)
+			} else if confChange.ChangeType == eraftpb.ConfChangeType_RemoveNode {
+				util.RemovePeer(newRegion, targetPeer.StoreId)
+				d.removePeerCache(targetPeer.StoreId)
+				if d.peer.Meta.StoreId == targetPeer.StoreId {
+					d.destroyPeer()
+					return nil, nil
+				}
+			}
+			d.RaftGroup.ApplyConfChange(*confChange)
+			storeMeta := d.ctx.storeMeta
+			storeMeta.Lock()
+			storeMeta.setRegion(newRegion, d.peer)
+			storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion})
+			storeMeta.Unlock()
+			meta.WriteRegionState(batch, newRegion, 0)
 		}
 		ps.applyState.AppliedIndex = entry.Index
 	}
