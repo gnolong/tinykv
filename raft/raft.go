@@ -267,8 +267,8 @@ func (r *Raft) sendSnapshot(to uint64) {
 		From:    r.id,
 	}
 	snapshot, err := r.RaftLog.storage.Snapshot()
-	for err != nil && err == ErrSnapshotTemporarilyUnavailable {
-		snapshot, err = r.RaftLog.storage.Snapshot()
+	if err != nil {
+		return
 	}
 	if err != nil {
 		log.Panicf("#%v, get snapshot failure", r.id)

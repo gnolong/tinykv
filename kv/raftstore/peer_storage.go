@@ -490,20 +490,6 @@ func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraf
 	// log.Infof("%v committing entries len:%v,[0]:index:%v,term:%v", ps.Tag, le, entries[0].Index, entries[0].Term)
 	applyState := *ps.applyState
 	batch := new(engine_util.WriteBatch)
-	// cur := 0
-	// for _, entry := range entries {
-	// 	if entry.Index != ps.AppliedIndex()+1 {
-	// 		log.Warningf("%v try to apply entries wrong", ps.Tag)
-	// 		cur++
-	// 		continue
-	// 	}
-	// 	break
-	// }
-	// if cur < le {
-	// 	entries = entries[cur:]
-	// } else {
-	// 	entries = make([]eraftpb.Entry, 0)
-	// }
 	var confChange *eraftpb.ConfChange
 	for _, entry := range entries {
 		// if entry.Index != ps.AppliedIndex()+1 {
@@ -584,6 +570,8 @@ func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraf
 						log.Panic(err)
 					}
 					d.newSplitRegion = newRegion2
+					d.notifyHeartbeatScheduler(newRegion1, d.peer)
+					d.notifyHeartbeatScheduler(newRegion2, newPeer)
 				}
 			}
 		} else if entry.EntryType == eraftpb.EntryType_EntryConfChange {
@@ -594,7 +582,11 @@ func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraf
 			if err := proto.Unmarshal(entry.Data, confChange); err != nil {
 				return nil, err
 			}
-			targetPeer := &metapb.Peer{Id: confChange.NodeId, StoreId: uint64(confChange.Context[0])}
+			var re raft_cmdpb.RaftCmdRequest
+			if err := proto.Unmarshal(confChange.Context, &re); err != nil {
+				return nil, err
+			}
+			targetPeer := &metapb.Peer{Id: confChange.NodeId, StoreId: re.AdminRequest.ChangePeer.Peer.StoreId}
 			if confChange.ChangeType == eraftpb.ConfChangeType_AddNode {
 				found := util.FindPeer(newRegion, targetPeer.StoreId)
 				if found != nil && (found.Id == targetPeer.Id || found.StoreId == targetPeer.StoreId) {
@@ -619,6 +611,7 @@ func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraf
 			storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion})
 			storeMeta.Unlock()
 			meta.WriteRegionState(batch, newRegion, 0)
+			d.notifyHeartbeatScheduler(newRegion, d.peer)
 		}
 		ps.applyState.AppliedIndex = entry.Index
 	}
@@ -629,4 +622,18 @@ func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraf
 		}
 	}
 	return entries, nil
+}
+
+func (d *peerMsgHandler) notifyHeartbeatScheduler(region *metapb.Region, peer *peer) {
+	clonedRegion := new(metapb.Region)
+	err := util.CloneMsg(region, clonedRegion)
+	if err != nil {
+		return
+	}
+	d.ctx.schedulerTaskSender <- &runner.SchedulerRegionHeartbeatTask{
+		Region:          clonedRegion,
+		Peer:            peer.Meta,
+		PendingPeers:    peer.CollectPendingPeers(),
+		ApproximateSize: peer.ApproximateSize,
+	}
 }
