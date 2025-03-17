@@ -109,6 +109,8 @@ type peer struct {
 	// It's updated everytime the split checker scan the data
 	// (Used in 3B split)
 	ApproximateSize *uint64
+
+	newSplitRegion *metapb.Region
 }
 
 func NewPeer(storeId uint64, cfg *config.Config, engines *engine_util.Engines, region *metapb.Region, regionSched chan<- worker.Task,
@@ -389,4 +391,8 @@ func (p *peer) sendRaftMessage(msg eraftpb.Message, trans Transport) error {
 	}
 	sendMsg.Message = &msg
 	return trans.Send(sendMsg)
+}
+
+func (p *peer) resetNewSplitRegion() {
+	p.newSplitRegion = nil
 }

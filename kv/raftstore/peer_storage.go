@@ -10,6 +10,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/pingcap/errors"
 
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
@@ -426,17 +427,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
-	// deepCopyRaftState := func() *rspb.RaftLocalState {
-	// 	return &rspb.RaftLocalState{
-	// 		HardState: &eraftpb.HardState{
-	// 			Term:   ps.raftState.HardState.Term,
-	// 			Commit: ps.raftState.HardState.Commit,
-	// 			Vote:   ps.raftState.HardState.Vote,
-	// 		},
-	// 		LastIndex: ps.raftState.LastIndex,
-	// 		LastTerm:  ps.raftState.LastTerm,
-	// 	}
-	// }
 
 	if ready == nil {
 		log.Debugf("%v ready is nil", ps.Tag)
@@ -475,8 +465,6 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	}
 	if raftWB.Len() > 0 {
 		if err := ps.Engines.WriteRaft(raftWB); err != nil {
-			// discard ps.raftState
-			// ps.raftState = raftState
 			return nil, err
 		}
 	}
@@ -498,33 +486,29 @@ func (ps *PeerStorage) clearRange(regionID uint64, start, end []byte) {
 func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraftpb.Entry, error) {
 	ps := d.peer.peerStorage
 	// log.Debugf("#%v begin to apply committed entries", ps.Tag)
-	le := len(entries)
-	// if le <= 0 {
-	// 	log.Debugf("%v committed entries is empty", ps.Tag)
-	// 	return nil, nil
-	// }
+	// le := len(entries)
 	// log.Infof("%v committing entries len:%v,[0]:index:%v,term:%v", ps.Tag, le, entries[0].Index, entries[0].Term)
 	applyState := *ps.applyState
 	batch := new(engine_util.WriteBatch)
-	cur := 0
-	for _, entry := range entries {
-		if entry.Index != ps.AppliedIndex()+1 {
-			log.Warningf("%v try to apply entries wrong", ps.Tag)
-			cur++
-			continue
-		}
-		break
-	}
-	if cur < le {
-		entries = entries[cur:]
-	} else {
-		entries = make([]eraftpb.Entry, 0)
-	}
+	// cur := 0
+	// for _, entry := range entries {
+	// 	if entry.Index != ps.AppliedIndex()+1 {
+	// 		log.Warningf("%v try to apply entries wrong", ps.Tag)
+	// 		cur++
+	// 		continue
+	// 	}
+	// 	break
+	// }
+	// if cur < le {
+	// 	entries = entries[cur:]
+	// } else {
+	// 	entries = make([]eraftpb.Entry, 0)
+	// }
 	var confChange *eraftpb.ConfChange
 	for _, entry := range entries {
-		if entry.Index != ps.AppliedIndex()+1 {
-			log.Panicf("%v try to apply entries wrong", ps.Tag)
-		}
+		// if entry.Index != ps.AppliedIndex()+1 {
+		// 	log.Panicf("%v try to apply entries wrong", ps.Tag)
+		// }
 		if entry.EntryType == eraftpb.EntryType_EntryNormal && entry.Data != nil {
 			var re raft_cmdpb.RaftCmdRequest
 			if err := proto.Unmarshal(entry.Data, &re); err != nil {
@@ -546,6 +530,60 @@ func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraf
 					}
 					ps.applyState.TruncatedState.Index = entry.Index
 					ps.applyState.TruncatedState.Term = entry.Term
+				case raft_cmdpb.AdminCmdType_Split:
+					splitReq := re.AdminRequest.Split
+					newRegion1 := &metapb.Region{}
+					util.CloneMsg(ps.region, newRegion1)
+					newRegion2 := &metapb.Region{
+						Id:       splitReq.NewRegionId,
+						StartKey: splitReq.SplitKey,
+						EndKey:   newRegion1.EndKey,
+						RegionEpoch: &metapb.RegionEpoch{
+							ConfVer: InitEpochConfVer,
+							Version: InitEpochVer,
+						},
+					}
+					newRegion1.EndKey = splitReq.SplitKey
+					if len(newRegion1.StartKey) != 0 && bytes.Compare(newRegion1.StartKey, newRegion1.EndKey) == 0 {
+						log.Panicf("%v bad split key:%v", ps.Tag, splitReq.SplitKey)
+					}
+					if len(newRegion2.StartKey) != 0 && bytes.Compare(newRegion2.StartKey, newRegion2.EndKey) == 0 {
+						log.Panicf("%v bad split key:%v", ps.Tag, splitReq.SplitKey)
+					}
+					newRegion1.RegionEpoch.Version++
+					cpPeers := make([]*metapb.Peer, 0)
+					for i, pr := range d.Region().Peers {
+						cpPeers = append(cpPeers, &metapb.Peer{
+							Id:      splitReq.NewPeerIds[i],
+							StoreId: pr.StoreId,
+						})
+					}
+					newRegion2.Peers = cpPeers
+
+					storeMeta := d.ctx.storeMeta
+					storeMeta.Lock()
+					storeMeta.setRegion(newRegion1, d.peer)
+					storeMeta.regions[newRegion2.Id] = newRegion2
+					storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion1})
+					storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion2})
+					storeMeta.Unlock()
+					meta.WriteRegionState(batch, newRegion1, 0)
+					meta.WriteRegionState(batch, newRegion2, 0)
+
+					newPeer, err := createPeer(d.storeID(), d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newRegion2)
+					if err != nil {
+						log.Panic(err)
+					}
+					d.ctx.router.register(newPeer)
+					startMsg := message.Msg{
+						RegionID: splitReq.NewRegionId,
+						Type:     message.MsgTypeStart,
+					}
+					err = d.ctx.router.send(splitReq.NewRegionId, startMsg)
+					if err != nil {
+						log.Panic(err)
+					}
+					d.newSplitRegion = newRegion2
 				}
 			}
 		} else if entry.EntryType == eraftpb.EntryType_EntryConfChange {

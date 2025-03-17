@@ -191,6 +191,9 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 		regionID := region.GetId()
 		req := NewRequest(regionID, region.RegionEpoch, reqs)
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
+		// if len(req.Requests) > 0 && req.Requests[0].CmdType == raft_cmdpb.CmdType_Snap {
+		// 	log.Warningf("request %s, response %s", req.String(), resp.String())
+		// }
 		if resp == nil {
 			// it should be timeouted innerly
 			SleepMS(100)

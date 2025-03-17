@@ -333,6 +333,9 @@ func (r *Raft) bcastHeartbeat() {
 func (r *Raft) tick() {
 	// Your Code Here (2A).
 	ifCampaign := func() {
+		if _, ok := r.Prs[r.id]; !ok {
+			return
+		}
 		if r.electionElapsed >= r.randomizedElectionTimeout {
 			// r.msgs = append(r.msgs, pb.Message{
 			// 	From: r.id,
