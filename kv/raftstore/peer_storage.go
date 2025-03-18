@@ -261,6 +261,9 @@ func (ps *PeerStorage) clearMeta(kvWB, raftWB *engine_util.WriteBatch) error {
 func (ps *PeerStorage) clearExtraData(newRegion *metapb.Region) {
 	oldStartKey, oldEndKey := ps.region.GetStartKey(), ps.region.GetEndKey()
 	newStartKey, newEndKey := newRegion.GetStartKey(), newRegion.GetEndKey()
+	if ps.region.Id != 1 && len(ps.region.StartKey) == 0 && len(newRegion.StartKey) == 0 {
+		log.Warningf("%s clearExtraData, region: %s, %s", ps.Tag, newRegion, ps.region)
+	}
 	if bytes.Compare(oldStartKey, newStartKey) < 0 {
 		ps.clearRange(newRegion.Id, oldStartKey, newStartKey)
 	}
@@ -394,11 +397,16 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		res := &ApplySnapResult{
 			PrevRegion: ps.region,
 		}
-		ps.clearExtraData(newRegion)
-		// this function will delete all persisted raft logs
-		// so last index must be updated
-		if err := ps.clearMeta(kvWB, raftWB); err != nil {
-			return nil, fmt.Errorf("clear meta failed: %v", err)
+		if ps.isInitialized() {
+			// if ps.region key range is ["", "") and region.Id != 1, clearing extra data is dangerous
+			// the peer is created by replicatePeer according to memebership message, need to sync region info
+			// from snapshot message.
+			ps.clearExtraData(newRegion)
+			// this function will delete all persisted raft logs
+			// so last index must be updated
+			if err := ps.clearMeta(kvWB, raftWB); err != nil {
+				return nil, fmt.Errorf("clear meta failed: %v", err)
+			}
 		}
 		ps.raftState.LastIndex = snapshot.Metadata.Index
 		ps.raftState.LastTerm = snapshot.Metadata.Term

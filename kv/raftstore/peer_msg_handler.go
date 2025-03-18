@@ -136,7 +136,7 @@ func (d *peerMsgHandler) preApply(ent eraftpb.Entry) (skipApply bool) {
 
 func (d *peerMsgHandler) callbackProposals(entry eraftpb.Entry, res *raft_cmdpb.RaftCmdResponse) {
 	callbackEntry := func(entry eraftpb.Entry, p *proposal) {
-		if entry.EntryType == eraftpb.EntryType_EntryNormal && entry.Data != nil{
+		if entry.EntryType == eraftpb.EntryType_EntryNormal && entry.Data != nil {
 			var re raft_cmdpb.RaftCmdRequest
 			if err := proto.Unmarshal(entry.Data, &re); err != nil {
 				p.cb.Done(ErrResp(err))
@@ -361,6 +361,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 					d.RaftGroup.TransferLeader(p.Id)
 				}
 			}
+			log.Warningf("%v transfer leader to %v", d.Tag, d.Region().Peers[0].Id)
 			cb.Done(ErrResp(errors.New("can not remove leader peer of two peers region")))
 			return
 		}

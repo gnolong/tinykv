@@ -747,6 +747,8 @@ func (r *Raft) handlePropose(m pb.Message) {
 
 func (r *Raft) handleTransfer(m pb.Message) {
 	if r.State != StateLeader {
+		m.To = r.Lead
+		r.msgs = append(r.msgs, m)
 		return
 	}
 	r.leadTransferee = m.From
