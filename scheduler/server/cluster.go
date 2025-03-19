@@ -280,6 +280,14 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
 
+	c.Lock()
+	defer c.Unlock()
+	// check if msg is stale
+	msgMeta := region.GetMeta()
+	if msgMeta == nil {
+		return nil
+	}
+	// validate peers
 	return nil
 }
 

@@ -75,6 +75,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				if err != nil {
 					log.Panic(err)
 				}
+				d.callbackProposals(entries[0], nil)
 				if d.stopped {
 					return
 				}
@@ -82,7 +83,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				if d.LastCompactedIdx <= d.peerStorage.truncatedIndex() {
 					d.ScheduleCompactLog(d.peerStorage.truncatedIndex())
 				}
-				d.callbackProposals(entries[0], nil)
 			}
 		}
 		d.RaftGroup.Advance(rd)
@@ -186,7 +186,6 @@ func (d *peerMsgHandler) callbackProposals(entry eraftpb.Entry, res *raft_cmdpb.
 			}
 			if re.AdminRequest != nil {
 				if re.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_Split {
-					res.Header.CurrentTerm = entry.Term
 					res.AdminResponse = &raft_cmdpb.AdminResponse{
 						CmdType: raft_cmdpb.AdminCmdType_Split,
 						Split: &raft_cmdpb.SplitResponse{
@@ -198,7 +197,6 @@ func (d *peerMsgHandler) callbackProposals(entry eraftpb.Entry, res *raft_cmdpb.
 					}
 					d.resetNewSplitRegion()
 				} else if re.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_CompactLog {
-					res.Header.CurrentTerm = entry.Term
 					res.AdminResponse = &raft_cmdpb.AdminResponse{
 						CmdType:    raft_cmdpb.AdminCmdType_CompactLog,
 						CompactLog: &raft_cmdpb.CompactLogResponse{},
@@ -208,12 +206,9 @@ func (d *peerMsgHandler) callbackProposals(entry eraftpb.Entry, res *raft_cmdpb.
 			p.cb.Done(res)
 		} else if entry.EntryType == eraftpb.EntryType_EntryConfChange {
 			res := newCmdResp()
-			res.Header.CurrentTerm = entry.Term
 			res.AdminResponse = &raft_cmdpb.AdminResponse{
 				CmdType: raft_cmdpb.AdminCmdType_ChangePeer,
-				ChangePeer: &raft_cmdpb.ChangePeerResponse{
-					Region: d.Region(),
-				},
+				ChangePeer: &raft_cmdpb.ChangePeerResponse{},
 			}
 			p.cb.Done(res)
 		}
@@ -355,15 +350,16 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_ChangePeer &&
 		msg.AdminRequest.ChangePeer != nil {
 		if msg.AdminRequest.ChangePeer.ChangeType == eraftpb.ConfChangeType_RemoveNode &&
-			d.IsLeader() && len(d.Region().Peers) == 2 && msg.AdminRequest.ChangePeer.Peer.Id == d.PeerId() {
+			len(d.Region().Peers) == 2 && msg.AdminRequest.ChangePeer.Peer.Id == d.LeaderId() {
+			// avoid leader remove itself but the follower doesn't have received the appendEntry rpc
+			// which is used to commit the conf change log
 			for _, p := range d.Region().Peers {
-				if p.Id != d.PeerId() {
+				if p.Id != d.LeaderId() {
 					d.RaftGroup.TransferLeader(p.Id)
+					log.Warningf("%v transfer leader to %v", d.Tag, p.Id)
+					break
 				}
 			}
-			log.Warningf("%v transfer leader to %v", d.Tag, d.Region().Peers[0].Id)
-			cb.Done(ErrResp(errors.New("can not remove leader peer of two peers region")))
-			return
 		}
 	}
 	// Your Code Here (2B).
@@ -386,13 +382,20 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 			Context:    val,
 		}); err != nil {
 			cb.Done(ErrResp(err))
+			// delete bad proposal!!!
+			if d.peer.nextProposalIndex() == d.peer.proposals[len(d.peer.proposals)-1].index {
+				d.peer.proposals = d.peer.proposals[:len(d.peer.proposals)-1]
+			}
 		}
 		// log.Infof("%v %s peer %v", d.Tag, msg.AdminRequest.ChangePeer.ChangeType, msg.AdminRequest.ChangePeer.Peer)
 		return
 	}
-	// must be under above code!!!
 	if err := d.RaftGroup.Propose(val); err != nil {
 		cb.Done(ErrResp(err))
+		// delete bad proposal!!!
+		if d.peer.nextProposalIndex() == d.peer.proposals[len(d.peer.proposals)-1].index {
+			d.peer.proposals = d.peer.proposals[:len(d.peer.proposals)-1]
+		}
 		return
 	}
 	// log.Warningf("%v, proposals len:%v,[0]:index:%v,term:%v", d.Tag, len(d.proposals), d.proposals[0].index, d.proposals[0].term)

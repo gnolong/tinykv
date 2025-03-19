@@ -356,8 +356,6 @@ func (r *Raft) tick() {
 		}
 	}
 
-	r.lock()
-	defer r.unLock()
 	switch r.State {
 	case StateFollower:
 		r.electionElapsed++
@@ -433,9 +431,7 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	r.lock()
-	defer r.unLock()
-	r.ifPromote()
+	// should return error to notify proposer
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
 		if r.State != StateLeader {
@@ -446,9 +442,7 @@ func (r *Raft) Step(m pb.Message) error {
 			r.bcastHeartbeat()
 		}
 	case pb.MessageType_MsgPropose:
-		if r.State != StateCandidate {
-			r.handlePropose(m)
-		}
+		return r.handlePropose(m)
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
@@ -468,6 +462,7 @@ func (r *Raft) Step(m pb.Message) error {
 	case pb.MessageType_MsgTimeoutNow:
 		r.handleTimeoutNow(m)
 	}
+	// r.ifPromote()
 	return nil
 }
 
@@ -564,6 +559,9 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	} else {
 		if p.Match < m.Index {
 			p.Match = m.Index
+			if r.leadTransferee == m.From {
+				r.ifPromote()
+			}
 			p.Next = p.Match + 1
 			if r.maybeCommit() {
 				// update followers commit index
@@ -728,21 +726,26 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 	}
 }
 
-func (r *Raft) handlePropose(m pb.Message) {
-	if r.State == StateFollower {
-		if r.Lead != None {
-			m.To = r.Lead
-			r.msgs = append(r.msgs, m)
-		}
-		return
+func (r *Raft) handlePropose(m pb.Message) error{
+	if r.State != StateLeader {
+		// should return error to notify proposer
+		return ErrProposalDropped
 	}
 	if r.leadTransferee != None {
-		return
+		return ErrProposalDropped
+	}
+	for _, ent := range m.Entries {
+		if ent.EntryType == pb.EntryType_EntryConfChange {
+			if r.PendingConfIndex > r.RaftLog.applied {
+				return ErrProposalDropped
+			}
+		}
 	}
 	for _, ent := range m.Entries {
 		r.appendEntry(ent)
 	}
 	r.bcastAppend()
+	return nil
 }
 
 func (r *Raft) handleTransfer(m pb.Message) {
@@ -756,7 +759,7 @@ func (r *Raft) handleTransfer(m pb.Message) {
 }
 
 func (r *Raft) ifPromote() {
-	if r.leadTransferee == None || r.leadTransferee == r.id {
+	if r.leadTransferee == None || r.Lead != r.id || r.leadTransferee == r.id {
 		r.leadTransferee = None
 		return
 	}
@@ -825,15 +828,8 @@ func (r *Raft) removeNode(id uint64) {
 	}
 	if r.State == StateLeader {
 		r.maybeCommit()
+		r.bcastAppend()
 	}
-}
-
-func (r *Raft) lock() {
-	// r.Lock()
-}
-
-func (r *Raft) unLock() {
-	// r.Unlock()
 }
 
 func (r *Raft) validateLastEntry4RequestVote(term uint64, index uint64) bool {
@@ -864,13 +860,13 @@ func (r *Raft) appendEntry(ent *pb.Entry) {
 	// TODO: term should be from hardstate?
 	ent.Term = r.Term
 	ent.Index = p.Next
-	if ent.EntryType == pb.EntryType_EntryConfChange {
-		if r.PendingConfIndex > r.RaftLog.applied {
-			return
-		} else {
-			r.PendingConfIndex = ent.Index
-		}
-	}
+	// if ent.EntryType == pb.EntryType_EntryConfChange {
+	// 	if r.PendingConfIndex > r.RaftLog.applied {
+	// 		return
+	// 	} else {
+	// 		r.PendingConfIndex = ent.Index
+	// 	}
+	// }
 	r.RaftLog.entries = append(r.RaftLog.entries, *ent)
 	p.Match = r.RaftLog.LastIndex()
 	p.Next = p.Match + 1

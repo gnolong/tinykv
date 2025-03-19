@@ -494,15 +494,13 @@ func (ps *PeerStorage) clearRange(regionID uint64, start, end []byte) {
 func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraftpb.Entry, error) {
 	ps := d.peer.peerStorage
 	// log.Debugf("#%v begin to apply committed entries", ps.Tag)
-	// le := len(entries)
 	// log.Infof("%v committing entries len:%v,[0]:index:%v,term:%v", ps.Tag, le, entries[0].Index, entries[0].Term)
 	applyState := *ps.applyState
 	batch := new(engine_util.WriteBatch)
 	var confChange *eraftpb.ConfChange
 	for _, entry := range entries {
-		// if entry.Index != ps.AppliedIndex()+1 {
-		// 	log.Panicf("%v try to apply entries wrong", ps.Tag)
-		// }
+		// entry.Index may be greater than ps.AppliedIndex() + 1
+		// when peer didn't apply the entries like stale split entry
 		if entry.EntryType == eraftpb.EntryType_EntryNormal && entry.Data != nil {
 			var re raft_cmdpb.RaftCmdRequest
 			if err := proto.Unmarshal(entry.Data, &re); err != nil {
@@ -596,7 +594,12 @@ func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraf
 			}
 			targetPeer := &metapb.Peer{Id: confChange.NodeId, StoreId: re.AdminRequest.ChangePeer.Peer.StoreId}
 			if confChange.ChangeType == eraftpb.ConfChangeType_AddNode {
-				found := util.FindPeer(newRegion, targetPeer.StoreId)
+				var found *metapb.Peer
+				for _, peer := range newRegion.Peers {
+					if peer.Id == targetPeer.Id {
+						found = peer
+					}
+				}
 				if found != nil && (found.Id == targetPeer.Id || found.StoreId == targetPeer.StoreId) {
 					log.Panicf("%v add peer %v again", ps.Tag, targetPeer)
 				}
@@ -605,12 +608,16 @@ func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraf
 				// like first heartbeat message.
 				d.insertPeerCache(targetPeer)
 			} else if confChange.ChangeType == eraftpb.ConfChangeType_RemoveNode {
+				if d.peer.Meta.Id == targetPeer.Id {
+					// alreay callback of proposals with `RegionNotFoundErr` in destroyPeer()
+					d.destroyPeer()
+					// it's important for leader to send region heardbeat to refresh region cache of scheduler
+					// to reduce request timeout to the peer?
+					d.notifyHeartbeatScheduler(d.Region(), d.peer)
+					return entries, nil
+				}
 				util.RemovePeer(newRegion, targetPeer.StoreId)
 				d.removePeerCache(targetPeer.StoreId)
-				if d.peer.Meta.StoreId == targetPeer.StoreId {
-					d.destroyPeer()
-					return nil, nil
-				}
 			}
 			d.RaftGroup.ApplyConfChange(*confChange)
 			storeMeta := d.ctx.storeMeta
@@ -619,7 +626,7 @@ func (d *peerMsgHandler) appplyCommittedEntries(entries []eraftpb.Entry) ([]eraf
 			storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion})
 			storeMeta.Unlock()
 			meta.WriteRegionState(batch, newRegion, 0)
-			d.notifyHeartbeatScheduler(newRegion, d.peer)
+			d.notifyHeartbeatScheduler(d.Region(), d.peer)
 		}
 		ps.applyState.AppliedIndex = entry.Index
 	}

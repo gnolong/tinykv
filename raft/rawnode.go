@@ -156,8 +156,6 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	rn.Raft.lock()
-	defer rn.Raft.unLock()
 	msgs := rn.Raft.msgs
 	hard := rn.Raft.newHardState()
 	soft := rn.Raft.softState()
