@@ -207,7 +207,7 @@ func (d *peerMsgHandler) callbackProposals(entry eraftpb.Entry, res *raft_cmdpb.
 		} else if entry.EntryType == eraftpb.EntryType_EntryConfChange {
 			res := newCmdResp()
 			res.AdminResponse = &raft_cmdpb.AdminResponse{
-				CmdType: raft_cmdpb.AdminCmdType_ChangePeer,
+				CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
 				ChangePeer: &raft_cmdpb.ChangePeerResponse{},
 			}
 			p.cb.Done(res)

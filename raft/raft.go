@@ -726,7 +726,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 	}
 }
 
-func (r *Raft) handlePropose(m pb.Message) error{
+func (r *Raft) handlePropose(m pb.Message) error {
 	if r.State != StateLeader {
 		// should return error to notify proposer
 		return ErrProposalDropped

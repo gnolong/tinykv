@@ -287,7 +287,60 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	if msgMeta == nil {
 		return nil
 	}
-	// validate peers
+	validatePeer := func(a *core.RegionInfo, b *core.RegionInfo) bool {
+		if a.GetLeader().GetId() != b.GetLeader().GetId() {
+			return false
+		}
+		if len(a.GetPeers()) != len(b.GetPeers()) {
+			return false
+		}
+		for i := range a.GetPeers() {
+			if a.GetPeers()[i].GetId() != b.GetPeers()[i].GetId() {
+				return false
+			}
+		}
+		if len(a.GetPendingPeers()) != len(b.GetPendingPeers()) {
+			return false
+		}
+		for i := range a.GetPendingPeers() {
+			if a.GetPendingPeers()[i].GetId() != b.GetPendingPeers()[i].GetId() {
+				return false
+			}
+		}
+		return a.GetApproximateSize() == b.GetApproximateSize()
+	}
+
+	coreMeta := c.GetRegion(msgMeta.Id)
+	// check if msg is newer than core
+	if coreMeta != nil {
+		if msgMeta.RegionEpoch.GetVersion() < coreMeta.GetMeta().RegionEpoch.GetVersion() ||
+			msgMeta.RegionEpoch.GetConfVer() < coreMeta.GetMeta().RegionEpoch.GetConfVer() {
+			return ErrRegionIsStale(region.GetMeta(), coreMeta.GetMeta())
+		}
+		if msgMeta.RegionEpoch.GetVersion() == coreMeta.GetMeta().RegionEpoch.GetVersion() &&
+			msgMeta.RegionEpoch.GetConfVer() == coreMeta.GetMeta().RegionEpoch.GetConfVer() {
+			if validatePeer(region, coreMeta) {
+				return nil
+			}
+		}
+	} else {
+		regionCnt := c.GetRegionCount()
+		regions := c.ScanRegions(msgMeta.GetStartKey(), msgMeta.GetEndKey(), regionCnt)
+		passAll := true
+		for _, reg := range regions {
+			if msgMeta.RegionEpoch.GetVersion() < reg.GetMeta().RegionEpoch.GetVersion() ||
+				msgMeta.RegionEpoch.GetConfVer() < reg.GetMeta().RegionEpoch.GetConfVer() {
+				passAll = false
+			}
+		}
+		if !passAll {
+			return ErrRegionIsStale(region.GetMeta(), nil)
+		}
+	}
+	c.core.PutRegion(region)
+	for _, peer := range region.GetPeers() {
+		c.updateStoreStatusLocked(peer.StoreId)
+	}
 	return nil
 }
 
