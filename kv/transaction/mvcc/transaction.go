@@ -104,11 +104,11 @@ func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 		return nil, nil
 	}
 	item := iter.Item()
-	userKey := item.Key()
-	if !bytes.Equal(DecodeUserKey(userKey), key) {
+	seekKey := item.Key()
+	if !bytes.Equal(DecodeUserKey(seekKey), key) {
 		return nil, nil
 	}
-	ts := decodeTimestamp(userKey)
+	ts := decodeTimestamp(seekKey)
 	if ts > txn.StartTS {
 		return nil, nil
 	}
@@ -161,8 +161,8 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	defer iter.Close()
 	for iter.Seek(EncodeKey(key, ^uint64(0))); iter.Valid(); iter.Next() {
 		item := iter.Item()
-		userKey := item.Key()
-		if !bytes.Equal(DecodeUserKey(userKey), key) {
+		seekKey := item.Key()
+		if !bytes.Equal(DecodeUserKey(seekKey), key) {
 			return nil, 0, nil
 		}
 		val, err := item.Value()
@@ -176,7 +176,7 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 		if write.StartTS > txn.StartTS {
 			continue
 		} else if write.StartTS == txn.StartTS {
-			commitTs := decodeTimestamp(userKey)
+			commitTs := decodeTimestamp(seekKey)
 			return write, commitTs, nil
 		}
 		break
@@ -195,8 +195,8 @@ func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 		return nil, 0, nil
 	}
 	item := iter.Item()
-	userKey := item.Key()
-	if !bytes.Equal(DecodeUserKey(userKey), key) {
+	seekKey := item.Key()
+	if !bytes.Equal(DecodeUserKey(seekKey), key) {
 		return nil, 0, nil
 	}
 	val, err := item.Value()
@@ -207,7 +207,7 @@ func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	commitTs := decodeTimestamp(userKey)
+	commitTs := decodeTimestamp(seekKey)
 	return write, commitTs, nil
 }
 
